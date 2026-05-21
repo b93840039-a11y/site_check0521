@@ -27,7 +27,6 @@
     .pdf-exporting {
       width: 210mm !important;
       max-width: 210mm !important;
-      /* 微調：將高度從 297mm 改為 296mm，預留 1mm 緩衝，完美避開小數點四捨五入造成的跨頁問題 */
       height: 296mm !important;
       min-height: 296mm !important;
       max-height: 296mm !important; 
@@ -73,20 +72,23 @@
       padding: 0 !important;
       background-color: transparent !important;
     }
-    .pdf-exporting input, .pdf-exporting textarea {
-      padding: 0.375rem 0.5rem !important;
-      font-size: 15px !important;
-      line-height: 1.25 !important;
-      background-color: transparent !important;
-      box-shadow: none !important;
-      color: black !important;
-      border: none !important;
-      outline: none !important;
-      margin: 0 !important;
-      -webkit-appearance: none !important;
-      appearance: none !important;
-      border-radius: 0 !important;
+    
+    /* 💥 解決 html2canvas 文字被壓縮的關鍵修正：截圖時隱藏 input，顯示純文字 div */
+    .pdf-exporting .print-hide {
+      display: none !important;
     }
+    .pdf-exporting .print-show {
+      display: flex !important;
+      align-items: center !important;
+      color: black !important;
+      background-color: transparent !important;
+    }
+    .pdf-exporting .print-show-block {
+      display: block !important;
+      color: black !important;
+      background-color: transparent !important;
+    }
+
     .pdf-exporting .photo-area {
       display: flex !important;
       flex-direction: column !important;
@@ -217,7 +219,6 @@
           return;
         }
 
-        // 上傳前先確認有沒有 API Key
         const apiKey = getApiKey();
         if (!apiKey) {
           showMessage('未取得 API Key，無法進行 AI 辨識。', 'error');
@@ -227,8 +228,8 @@
         const reader = new FileReader();
         reader.onload = (event) => {
           const base64Data = event.target.result;
-          setPhotoDataUrl(base64Data); // 直接顯示並保留原始圖片
-          processImageWithAI(base64Data, file.type, apiKey); // 將 apiKey 傳入
+          setPhotoDataUrl(base64Data); 
+          processImageWithAI(base64Data, file.type, apiKey); 
         };
         reader.readAsDataURL(file);
       };
@@ -237,8 +238,8 @@
       useEffect(() => {
         if (isEditingPhoto && cropperImgRef.current && window.Cropper) {
           cropperRef.current = new window.Cropper(cropperImgRef.current, {
-            viewMode: 1, // 限制裁切框不能超出圖片範圍
-            dragMode: 'move', // 預設拖曳圖片
+            viewMode: 1, 
+            dragMode: 'move', 
             autoCropArea: 0.9,
             restore: false,
             guides: true,
@@ -264,7 +265,6 @@
             imageSmoothingEnabled: true,
             imageSmoothingQuality: 'high',
           });
-          // 取得裁切後的高畫質圖片並更新畫面
           setPhotoDataUrl(canvas.toDataURL('image/jpeg', 0.95));
           setIsEditingPhoto(false);
         }
@@ -282,7 +282,7 @@
              throw new Error(`[429] 請求太頻繁，請稍等 1~2 分鐘後再上傳照片。`);
           }
           if (modelsResponse.status === 400 || modelsResponse.status === 403) {
-             localStorage.removeItem('gemini_api_key'); // 密碼錯誤，自動清除
+             localStorage.removeItem('gemini_api_key');
              throw new Error(`API 金鑰無效或遭拒，已為您清除舊紀錄，請重新整理網頁後再次輸入。`);
           }
           if (!modelsResponse.ok) {
@@ -320,7 +320,6 @@
             9. managerPhone (聯絡電話): 對應上述負責人或工地的聯絡電話。
 
             ⚠️ 重要指示：請「只」輸出 JSON 格式的資料，絕對不要加上任何 \`\`\`json 標記、也不要加上任何額外的文字說明。
-            輸出範例：{"licenseNumber":"...", "projectName":"..."}
           `;
 
           const payload = {
@@ -340,7 +339,6 @@
 
           for (const model of availableModels) {
             try {
-              console.log(`正在使用模型：${model}...`);
               const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
               
               const result = await fetchWithRetry(url, {
@@ -350,24 +348,15 @@
               });
 
               aiText = result.candidates?.[0]?.content?.parts?.[0]?.text;
-              
-              if (aiText) {
-                break; 
-              }
+              if (aiText) break; 
             } catch (error) {
               lastErrorMessage = error.message;
-              if (error.message.includes('[429]')) {
-                 throw error;
-              }
-              if (!error.message.includes('[404]') && !error.message.includes('[503]') && !error.message.includes('503')) {
-                throw error; 
-              }
+              if (error.message.includes('[429]')) throw error;
+              if (!error.message.includes('[404]') && !error.message.includes('[503]') && !error.message.includes('503')) throw error; 
             }
           }
 
-          if (!aiText) {
-            throw new Error(`辨識失敗。已嘗試所有可用模型，最後報錯為：${lastErrorMessage}`);
-          }
+          if (!aiText) throw new Error(`辨識失敗。已嘗試所有可用模型，最後報錯為：${lastErrorMessage}`);
           
           aiText = aiText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
           const aiData = JSON.parse(aiText);
@@ -401,9 +390,7 @@
           return;
         }
 
-        // 強制將畫面滾動到最頂部，防止截圖發生偏移
         window.scrollTo(0, 0);
-
         const element = pdfContainerRef.current;
         element.classList.add('pdf-exporting');
 
@@ -415,10 +402,10 @@
             scale: 2, 
             useCORS: true, 
             logging: false,
-            scrollY: 0 // 確保 html2canvas 從頂端擷取，不受滾動條影響
+            scrollY: 0
           },
           jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-          pagebreak: { mode: 'avoid-all' } // 告訴系統盡量避免跨頁分段
+          pagebreak: { mode: 'avoid-all' }
         };
 
         window.html2pdf().set(opt).from(element).save().then(() => {
@@ -427,7 +414,6 @@
         });
       };
 
-      // --- 升級：匯出圖片與原生分享 (Web Share API) 邏輯 ---
       const handleShareOrExportImage = () => {
         if (!window.html2canvas) {
           showMessage('圖片匯出模組尚未載入完成，請稍後再試。', 'error');
@@ -449,7 +435,6 @@
              const filename = `工地回報單_${formData.projectName || '未命名'}_${formData.reportDate}.jpg`;
              element.classList.remove('pdf-exporting');
 
-             // 將 Base64 轉換為 File 物件以供分享
              const arr = imgData.split(',');
              const mime = arr[0].match(/:(.*?);/)[1];
              const bstr = atob(arr[1]);
@@ -460,7 +445,6 @@
              }
              const file = new File([u8arr], filename, { type: mime });
 
-             // 檢查設備是否支援原生分享檔案 (如 iOS Safari, Android Chrome)
              if (navigator.canShare && navigator.canShare({ files: [file] })) {
                 try {
                     await navigator.share({
@@ -470,7 +454,6 @@
                     });
                     showMessage('呼叫分享選單成功！', 'success');
                 } catch (error) {
-                    // 使用者取消分享不報錯，其他錯誤則降級為下載
                     if (error.name !== 'AbortError') {
                         console.warn('分享失敗，改為下載:', error);
                         showMessage('直接分享失敗，已改為自動下載圖片。', 'warning');
@@ -478,7 +461,6 @@
                     }
                 }
              } else {
-                // 不支援原生分享的設備 (如部分電腦版瀏覽器)，直接觸發下載
                 showMessage('已自動下載圖片，請手動傳送至 LINE。', 'info');
                 downloadImage(imgData, filename);
              }
@@ -491,7 +473,6 @@
         }, 150);
       };
 
-      // 輔助下載函式
       const downloadImage = (dataUrl, filename) => {
          const link = document.createElement('a');
          link.download = filename;
@@ -508,7 +489,6 @@
                   <svg className="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
                   工地回報單自動化系統
                 </h1>
-                {/* 🔑 API Key 重設按鈕 */}
                 <button onClick={resetApiKey} className="text-xs text-gray-500 hover:text-teal-600 flex items-center gap-1 border border-gray-200 px-2 py-1 rounded" title="更換您的 Gemini API Key">
                   <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>重設金鑰
                 </button>
@@ -545,7 +525,6 @@
                 匯出 PDF
               </button>
 
-              {/* ✅ 升級的匯出與分享按鈕 */}
               <button 
                 onClick={handleShareOrExportImage}
                 className="w-full sm:w-auto flex justify-center items-center gap-2 bg-[#06C755] hover:bg-[#05b34c] text-white px-4 py-2.5 sm:py-2 rounded-lg transition-colors shadow-sm"
@@ -556,7 +535,6 @@
             </div>
           </div>
 
-          {/* 手機版向下滾動提示 */}
           <div className="max-w-4xl mx-auto flex justify-center items-center text-xs text-blue-600 mb-2 sm:hidden px-1">
             <svg className="w-4 h-4 mr-1 animate-bounce" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"></path></svg>
             <span>請向下滾動以查看或編輯完整表單</span>
@@ -588,87 +566,104 @@
                   <tr className="block md:table-row">
                     <td className="label-cell block md:table-cell border border-gray-400 p-2.5 md:p-2 bg-gray-100 font-semibold">回報人員</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="reporter" value={formData.reporter} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="reporter" value={formData.reporter} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.reporter}</div>
                     </td>
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">回報日期</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="date" name="reportDate" value={formData.reportDate} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="date" name="reportDate" value={formData.reportDate} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.reportDate}</div>
                     </td>
                   </tr>
                   <tr className="block md:table-row">
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">執照字號</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="licenseNumber" value={formData.licenseNumber} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="licenseNumber" value={formData.licenseNumber} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.licenseNumber}</div>
                     </td>
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">工地完工(交屋日)</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="completionDate" value={formData.completionDate} onChange={handleInputChange} placeholder="YYYY-MM-DD 或 未知" className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="completionDate" value={formData.completionDate} onChange={handleInputChange} placeholder="YYYY-MM-DD 或 未知" className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.completionDate}</div>
                     </td>
                   </tr>
                   <tr className="block md:table-row">
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">案地名稱</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="projectName" value={formData.projectName} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="projectName" value={formData.projectName} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.projectName}</div>
                     </td>
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">總建戶</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="totalUnits" value={formData.totalUnits} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="totalUnits" value={formData.totalUnits} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.totalUnits}</div>
                     </td>
                   </tr>
                   <tr className="block md:table-row">
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">案地地址</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="projectAddress" value={formData.projectAddress} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="projectAddress" value={formData.projectAddress} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.projectAddress}</div>
                     </td>
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">建築型態<br/><span className="text-xs font-normal text-gray-600 md:inline hidden">(大樓/透天等等)</span></td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="buildingType" value={formData.buildingType} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="buildingType" value={formData.buildingType} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.buildingType}</div>
                     </td>
                   </tr>
                   <tr className="block md:table-row">
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">建商名稱</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent" colSpan="3">
-                      <input type="text" name="builderName" value={formData.builderName} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="builderName" value={formData.builderName} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.builderName}</div>
                     </td>
                   </tr>
                   <tr className="block md:table-row">
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">營造名稱</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="constructorName" value={formData.constructorName} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="constructorName" value={formData.constructorName} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.constructorName}</div>
                     </td>
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">集團名稱</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="groupName" value={formData.groupName} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="groupName" value={formData.groupName} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.groupName}</div>
                     </td>
                   </tr>
                   <tr className="block md:table-row">
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">工地負責人</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="siteManager" value={formData.siteManager} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="siteManager" value={formData.siteManager} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.siteManager}</div>
                     </td>
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">聯絡電話</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="managerPhone" value={formData.managerPhone} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="managerPhone" value={formData.managerPhone} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.managerPhone}</div>
                     </td>
                   </tr>
                   <tr className="block md:table-row">
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">保全(代銷)公司</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="securityCompany" value={formData.securityCompany} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="securityCompany" value={formData.securityCompany} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.securityCompany}</div>
                     </td>
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">聯絡電話</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="securityPhone" value={formData.securityPhone} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="securityPhone" value={formData.securityPhone} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.securityPhone}</div>
                     </td>
                   </tr>
                   <tr className="block md:table-row">
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">目前工地狀況</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="currentStatus" value={formData.currentStatus} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="currentStatus" value={formData.currentStatus} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.currentStatus}</div>
                     </td>
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">服務區</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="serviceArea" value={formData.serviceArea} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="serviceArea" value={formData.serviceArea} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.serviceArea}</div>
                     </td>
                   </tr>
                   <tr className="block md:table-row">
@@ -678,8 +673,9 @@
                         name="suggestions" 
                         value={formData.suggestions} 
                         onChange={handleInputChange} 
-                        className="w-full h-24 bg-transparent border-none box-border outline-none resize-none px-3 md:px-2 py-1 md:py-2 focus:bg-blue-50 text-base sm:text-[15px]"
+                        className="print-hide w-full h-24 bg-transparent border-none box-border outline-none resize-none px-3 md:px-2 py-1 md:py-2 focus:bg-blue-50 text-base sm:text-[15px]"
                       ></textarea>
+                      <div className="print-show-block hidden w-full h-24 box-border px-3 md:px-2 py-1 md:py-2 text-base sm:text-[15px] whitespace-pre-wrap break-words">{formData.suggestions}</div>
                     </td>
                   </tr>
                 </tbody>
