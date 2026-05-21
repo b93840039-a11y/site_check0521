@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>工地回報單自動化系統</title>
+
+  <!-- 1. 載入 Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- 2. 載入 React 與 ReactDOM -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+
+  <!-- 3. 載入 Babel (讓瀏覽器能直接看懂 JSX 語法) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- 4. 載入 HTML2PDF 與 Cropper.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
+
+  <!-- PDF 專用列印樣式 -->
+  <style>
+    /* --- PDF 匯出強制轉為 A4 絕對尺寸與嚴格表格排版 --- */
+    .pdf-exporting {
+      width: 210mm !important;
+      max-width: 210mm !important;
+      /* 微調：將高度從 297mm 改為 296mm，預留 1mm 緩衝，完美避開小數點四捨五入造成的跨頁問題 */
+      height: 296mm !important;
+      min-height: 296mm !important;
+      max-height: 296mm !important; 
+      padding: 15mm 15mm 15mm 10mm !important;
+      overflow: hidden !important;
+      display: flex !important;
+      flex-direction: column !important;
+      box-sizing: border-box !important;
+    }
+    .pdf-exporting h2 {
+      display: block !important;
+    }
+    .pdf-exporting table {
+      display: table !important;
+      width: 100% !important;
+      table-layout: fixed !important;
+      border-collapse: collapse !important;
+    }
+    .pdf-exporting colgroup {
+      display: table-column-group !important;
+    }
+    .pdf-exporting tbody {
+      display: table-row-group !important;
+    }
+    .pdf-exporting tr {
+      display: table-row !important;
+      margin: 0 !important;
+      border: none !important;
+    }
+    .pdf-exporting td {
+      display: table-cell !important;
+      border: 1px solid #9ca3af !important;
+      height: auto !important;
+      width: auto !important;
+      margin: 0 !important;
+    }
+    .pdf-exporting .label-cell {
+      padding: 0.5rem !important;
+      background-color: #f3f4f6 !important;
+    }
+    .pdf-exporting .input-cell {
+      padding: 0 !important;
+      background-color: transparent !important;
+    }
+    .pdf-exporting input, .pdf-exporting textarea {
+      padding: 0.375rem 0.5rem !important;
+      font-size: 15px !important;
+      line-height: 1.25 !important;
+      background-color: transparent !important;
+      box-shadow: none !important;
+      color: black !important;
+      border: none !important;
+      outline: none !important;
+      margin: 0 !important;
+      -webkit-appearance: none !important;
+      appearance: none !important;
+      border-radius: 0 !important;
+    }
+    .pdf-exporting .photo-area {
+      display: flex !important;
+      flex-direction: column !important;
+      flex: 1 1 0% !important;
+      min-height: 0 !important;
+      margin-top: 1rem !important;
+    }
+    .pdf-exporting .hide-on-pdf {
+      display: none !important;
+    }
+  </style>
+</head>
+<body class="bg-gray-100">
+  <div id="root"></div>
+
+  <!-- React 應用程式邏輯 -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // --- API 工具函式：帶有指數退避與詳細錯誤捕捉的重試機制 ---
+    const fetchWithRetry = async (url, options, maxRetries = 3) => {
+      let retries = 0;
+      const baseDelay = 1000;
+
+      while (retries < maxRetries) {
+        try {
+          const response = await fetch(url, options);
+          if (!response.ok) {
+            const errorText = await response.text();
+            if (response.status === 400 || response.status === 403 || response.status === 404) {
+               let parsedError = errorText;
+               try { 
+                 const jsonObj = JSON.parse(errorText);
+                 parsedError = jsonObj.error.message || errorText;
+               } catch(e) {}
+               throw new Error(`[${response.status}] ${parsedError}`);
+            }
+            if (response.status === 429) {
+                throw new Error(`[429] API 請求次數暫時達上限，請稍等 1~2 分鐘後再試`);
+            }
+            if (response.status === 503) {
+                throw new Error(`[503] Google AI 伺服器目前忙碌中或正在維護`);
+            }
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+          return await response.json();
+        } catch (error) {
+          if (error.message.includes('[400]') || error.message.includes('[403]') || error.message.includes('[404]')) {
+             throw error;
+          }
+          retries++;
+          if (retries >= maxRetries) throw error;
+          const delay = baseDelay * Math.pow(2, retries - 1);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    };
+
+    function App() {
+      const fileInputRef = useRef(null);
+      const pdfContainerRef = useRef(null);
+      
+      // 圖片編輯器相關狀態
+      const [isEditingPhoto, setIsEditingPhoto] = useState(false);
+      const cropperRef = useRef(null);
+      const cropperImgRef = useRef(null);
+      
+      const [isProcessing, setIsProcessing] = useState(false);
+      const [photoDataUrl, setPhotoDataUrl] = useState(null);
+      const [message, setMessage] = useState({ text: '', type: '' });
+
+      const [formData, setFormData] = useState({
+        reporter: '姜智軒',
+        reportDate: new Date().toISOString().split('T')[0],
+        licenseNumber: '',
+        completionDate: '',
+        projectName: '',
+        totalUnits: '',
+        projectAddress: '',
+        buildingType: '',
+        builderName: '',
+        constructorName: '',
+        groupName: '凱擘大寬頻',
+        siteManager: '',
+        managerPhone: '',
+        securityCompany: '',
+        securityPhone: '',
+        currentStatus: '',
+        serviceArea: '',
+        suggestions: ''
+      });
+
+      const handleInputChange = (e) => {
+        const { name, value } = e.target;
+        setFormData(prev => ({ ...prev, [name]: value }));
+      };
+
+      const showMessage = (text, type = 'info') => {
+        setMessage({ text, type });
+        setTimeout(() => setMessage({ text: '', type: '' }), 8000);
+      };
+
+      // --- 取得並設定 API Key (手動輸入防護機制) ---
+      const getApiKey = () => {
+        const savedKey = localStorage.getItem('gemini_api_key');
+        if (!savedKey) {
+          const key = prompt("請輸入您的 Gemini API Key (此 Key 將安全儲存在您的瀏覽器中，不會公開上傳):");
+          if (key) {
+            localStorage.setItem('gemini_api_key', key);
+            return key;
+          }
+          return null;
+        }
+        return savedKey;
+      };
+
+      const resetApiKey = () => {
+        localStorage.removeItem('gemini_api_key');
+        showMessage('API 金鑰已清除！下次上傳照片時將重新要求輸入。', 'success');
+      };
+
+      const handleFileChange = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        if (!file.type.startsWith('image/')) {
+          showMessage('請上傳圖片檔案 (JPG/PNG)', 'error');
+          return;
+        }
+
+        // 上傳前先確認有沒有 API Key
+        const apiKey = getApiKey();
+        if (!apiKey) {
+          showMessage('未取得 API Key，無法進行 AI 辨識。', 'error');
+          return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const base64Data = event.target.result;
+          setPhotoDataUrl(base64Data); // 直接顯示並保留原始圖片
+          processImageWithAI(base64Data, file.type, apiKey); // 將 apiKey 傳入
+        };
+        reader.readAsDataURL(file);
+      };
+
+      // --- 照片編輯器邏輯 ---
+      useEffect(() => {
+        if (isEditingPhoto && cropperImgRef.current && window.Cropper) {
+          cropperRef.current = new window.Cropper(cropperImgRef.current, {
+            viewMode: 1, // 限制裁切框不能超出圖片範圍
+            dragMode: 'move', // 預設拖曳圖片
+            autoCropArea: 0.9,
+            restore: false,
+            guides: true,
+            center: true,
+            highlight: false,
+            cropBoxMovable: true,
+            cropBoxResizable: true,
+            toggleDragModeOnDblclick: true,
+          });
+        }
+
+        return () => {
+          if (cropperRef.current) {
+            cropperRef.current.destroy();
+            cropperRef.current = null;
+          }
+        };
+      }, [isEditingPhoto]);
+
+      const handleCropConfirm = () => {
+        if (cropperRef.current) {
+          const canvas = cropperRef.current.getCroppedCanvas({
+            imageSmoothingEnabled: true,
+            imageSmoothingQuality: 'high',
+          });
+          // 取得裁切後的高畫質圖片並更新畫面
+          setPhotoDataUrl(canvas.toDataURL('image/jpeg', 0.95));
+          setIsEditingPhoto(false);
+        }
+      };
+
+      const processImageWithAI = async (dataUrl, mimeType, apiKey) => {
+        setIsProcessing(true);
+        showMessage('步驟 1/2：正在向 Google 取得可用模型清單...', 'info');
+
+        try {
+          const modelsUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
+          const modelsResponse = await fetch(modelsUrl);
+          
+          if (modelsResponse.status === 429) {
+             throw new Error(`[429] 請求太頻繁，請稍等 1~2 分鐘後再上傳照片。`);
+          }
+          if (modelsResponse.status === 400 || modelsResponse.status === 403) {
+             localStorage.removeItem('gemini_api_key'); // 密碼錯誤，自動清除
+             throw new Error(`API 金鑰無效或遭拒，已為您清除舊紀錄，請重新整理網頁後再次輸入。`);
+          }
+          if (!modelsResponse.ok) {
+            throw new Error(`[${modelsResponse.status}] API 金鑰驗證失敗。`);
+          }
+          
+          const modelsData = await modelsResponse.json();
+          let availableModels = modelsData.models
+            .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
+            .map(m => m.name.replace('models/', ''))
+            .filter(name => name.includes('flash') || name.includes('pro') || name.includes('vision'));
+
+          if (availableModels.length === 0) {
+            throw new Error("您的帳號內沒有找到支援圖片辨識的模型，請檢查 Google 專案權限。");
+          }
+
+          showMessage(`步驟 2/2：找到可用模型，開始辨識綠牌資訊...`, 'info');
+
+          const base64Image = dataUrl.split(',')[1];
+          
+          const prompt = `
+            你是一個專業的台灣建築工地資料助理。這是一張包含工地告示牌（俗稱綠牌）的照片。
+            請幫我從照片中擷取以下資訊，並嚴格按照 JSON 格式回傳。
+            若照片中無法找到某個欄位的資訊，請填入空字串 ""。
+            
+            需要擷取的欄位與規則如下：
+            1. licenseNumber (執照字號): 通常包含「建字第」或「雜字第」等字樣。
+            2. projectName (案地名稱): 通常寫為「工程名稱」。
+            3. projectAddress (案地地址): 通常寫為「工地位置」或「起造地點」。
+            4. builderName (建商名稱): 通常為「起造人」。
+            5. constructorName (營造名稱): 通常為「承造人」。
+            6. completionDate (工地完工交屋日): 若有「預定完工日期」請直接填寫；若只有開工日期和工期(日曆天)，請幫忙推算，格式為 YYYY-MM-DD。
+            7. buildingType (建築型態): 從工程名稱或樓層資訊中判斷是大樓、透天或廠房等。
+            8. siteManager (工地負責人): 通常寫為「專任工程人員」、「工地主任」或「承造人專任工程人員」。
+            9. managerPhone (聯絡電話): 對應上述負責人或工地的聯絡電話。
+
+            ⚠️ 重要指示：請「只」輸出 JSON 格式的資料，絕對不要加上任何 \`\`\`json 標記、也不要加上任何額外的文字說明。
+            輸出範例：{"licenseNumber":"...", "projectName":"..."}
+          `;
+
+          const payload = {
+            contents: [
+              {
+                role: "user",
+                parts: [
+                  { text: prompt },
+                  { inlineData: { mimeType: mimeType, data: base64Image } }
+                ]
+              }
+            ]
+          };
+
+          let aiText = null;
+          let lastErrorMessage = "";
+
+          for (const model of availableModels) {
+            try {
+              console.log(`正在使用模型：${model}...`);
+              const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+              
+              const result = await fetchWithRetry(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              });
+
+              aiText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+              
+              if (aiText) {
+                break; 
+              }
+            } catch (error) {
+              lastErrorMessage = error.message;
+              if (error.message.includes('[429]')) {
+                 throw error;
+              }
+              if (!error.message.includes('[404]') && !error.message.includes('[503]') && !error.message.includes('503')) {
+                throw error; 
+              }
+            }
+          }
+
+          if (!aiText) {
+            throw new Error(`辨識失敗。已嘗試所有可用模型，最後報錯為：${lastErrorMessage}`);
+          }
+          
+          aiText = aiText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+          const aiData = JSON.parse(aiText);
+          
+          setFormData(prev => ({
+            ...prev,
+            licenseNumber: aiData.licenseNumber || prev.licenseNumber,
+            projectName: aiData.projectName || prev.projectName,
+            projectAddress: aiData.projectAddress || prev.projectAddress,
+            builderName: aiData.builderName || prev.builderName,
+            constructorName: aiData.constructorName || prev.constructorName,
+            completionDate: aiData.completionDate || prev.completionDate,
+            buildingType: aiData.buildingType || prev.buildingType,
+            siteManager: aiData.siteManager || prev.siteManager,
+            managerPhone: aiData.managerPhone || prev.managerPhone,
+          }));
+          
+          showMessage('AI 辨識完成！已自動填入相關欄位。', 'success');
+
+        } catch (error) {
+          console.error("AI 處理錯誤:", error);
+          showMessage(`系統錯誤：${error.message}`, 'error');
+        } finally {
+          setIsProcessing(false);
+        }
+      };
+
+      const handleExportPDF = () => {
+        if (!window.html2pdf) {
+          showMessage('PDF 匯出模組尚未載入完成，請稍後再試。', 'error');
+          return;
+        }
+
+        // 強制將畫面滾動到最頂部，防止截圖發生偏移
+        window.scrollTo(0, 0);
+
+        const element = pdfContainerRef.current;
+        element.classList.add('pdf-exporting');
+
+        const opt = {
+          margin: 0, 
+          filename: `工地回報單_${formData.projectName || '未命名'}_${formData.reportDate}.pdf`,
+          image: { type: 'jpeg', quality: 1 },
+          html2canvas: { 
+            scale: 2, 
+            useCORS: true, 
+            logging: false,
+            scrollY: 0 // 確保 html2canvas 從頂端擷取，不受滾動條影響
+          },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+          pagebreak: { mode: 'avoid-all' } // 告訴系統盡量避免跨頁分段
+        };
+
+        window.html2pdf().set(opt).from(element).save().then(() => {
+           element.classList.remove('pdf-exporting');
+           showMessage('PDF 匯出成功！', 'success');
+        });
+      };
+
+      return (
+        <div className="min-h-screen bg-gray-100 p-2 sm:p-4 md:p-8 font-sans text-gray-800">
+          <div className="max-w-4xl mx-auto mb-4 sm:mb-6 bg-white p-4 rounded-xl shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+            <div className="w-full">
+              <div className="flex items-center gap-3">
+                <h1 className="text-xl sm:text-2xl font-bold text-teal-700 flex items-center gap-2">
+                  <svg className="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                  工地回報單自動化系統
+                </h1>
+                {/* 🔑 API Key 重設按鈕 */}
+                <button onClick={resetApiKey} className="text-xs text-gray-500 hover:text-teal-600 flex items-center gap-1 border border-gray-200 px-2 py-1 rounded" title="更換您的 Gemini API Key">
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>重設金鑰
+                </button>
+              </div>
+              <p className="text-xs sm:text-sm text-gray-500 mt-1">上傳綠牌照片，AI 自動為您填單！</p>
+            </div>
+            
+            <div className="flex flex-col sm:flex-row gap-2 sm:gap-3 w-full sm:w-auto">
+              <input 
+                type="file" 
+                accept="image/*" 
+                className="hidden" 
+                ref={fileInputRef} 
+                onChange={handleFileChange} 
+              />
+              <button 
+                onClick={() => fileInputRef.current.click()}
+                disabled={isProcessing}
+                className="w-full sm:w-auto flex justify-center items-center gap-2 bg-teal-600 hover:bg-teal-700 text-white px-4 py-2.5 sm:py-2 rounded-lg transition-colors disabled:opacity-50"
+              >
+                {isProcessing ? (
+                  <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                ) : (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+                )}
+                {isProcessing ? 'AI 辨識中...' : '上傳綠牌照片'}
+              </button>
+              
+              <button 
+                onClick={handleExportPDF}
+                className="w-full sm:w-auto flex justify-center items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 sm:py-2 rounded-lg transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                匯出 PDF
+              </button>
+            </div>
+          </div>
+
+          {/* 手機版向下滾動提示 */}
+          <div className="max-w-4xl mx-auto flex justify-center items-center text-xs text-blue-600 mb-2 sm:hidden px-1">
+            <svg className="w-4 h-4 mr-1 animate-bounce" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"></path></svg>
+            <span>請向下滾動以查看或編輯完整表單</span>
+          </div>
+
+          {message.text && (
+            <div className={`max-w-4xl mx-auto mb-4 p-4 rounded-lg flex items-center gap-3 text-sm sm:text-base ${message.type === 'error' ? 'bg-red-100 text-red-700' : message.type === 'success' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
+               <span>{message.text}</span>
+            </div>
+          )}
+
+          <div className="max-w-4xl mx-auto bg-gray-200 p-0 sm:p-2 sm:rounded-xl border-y sm:border border-gray-300">
+            <div 
+              ref={pdfContainerRef}
+              id="pdf-export-area"
+              className="bg-white mx-auto shadow-md flex flex-col relative w-full max-w-[210mm] min-h-screen md:min-h-[297mm] p-3 md:p-[15mm_15mm_15mm_10mm] overflow-hidden"
+              style={{ boxSizing: 'border-box' }}
+            >
+              <h2 className="text-3xl font-bold text-center mb-6 tracking-widest text-black shrink-0 hidden md:block">工地回報單</h2>
+              
+              <table className="w-full block md:table border-collapse text-base sm:text-[15px] leading-tight shrink-0">
+                <colgroup className="hidden md:table-column-group">
+                  <col style={{ width: '18%' }} />
+                  <col style={{ width: '42%' }} />
+                  <col style={{ width: '22%' }} />
+                  <col style={{ width: '18%' }} />
+                </colgroup>
+                <tbody className="block md:table-row-group">
+                  <tr className="block md:table-row">
+                    <td className="label-cell block md:table-cell border border-gray-400 p-2.5 md:p-2 bg-gray-100 font-semibold">回報人員</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="reporter" value={formData.reporter} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">回報日期</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="date" name="reportDate" value={formData.reportDate} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                  </tr>
+                  <tr className="block md:table-row">
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">執照字號</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="licenseNumber" value={formData.licenseNumber} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">工地完工(交屋日)</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="completionDate" value={formData.completionDate} onChange={handleInputChange} placeholder="YYYY-MM-DD 或 未知" className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                  </tr>
+                  <tr className="block md:table-row">
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">案地名稱</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="projectName" value={formData.projectName} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">總建戶</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="totalUnits" value={formData.totalUnits} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                  </tr>
+                  <tr className="block md:table-row">
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">案地地址</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="projectAddress" value={formData.projectAddress} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">建築型態<br/><span className="text-xs font-normal text-gray-600 md:inline hidden">(大樓/透天等等)</span></td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="buildingType" value={formData.buildingType} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                  </tr>
+                  <tr className="block md:table-row">
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">建商名稱</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent" colSpan="3">
+                      <input type="text" name="builderName" value={formData.builderName} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                  </tr>
+                  <tr className="block md:table-row">
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">營造名稱</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="constructorName" value={formData.constructorName} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">集團名稱</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="groupName" value={formData.groupName} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                  </tr>
+                  <tr className="block md:table-row">
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">工地負責人</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="siteManager" value={formData.siteManager} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">聯絡電話</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="managerPhone" value={formData.managerPhone} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                  </tr>
+                  <tr className="block md:table-row">
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">保全(代銷)公司</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="securityCompany" value={formData.securityCompany} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">聯絡電話</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="securityPhone" value={formData.securityPhone} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                  </tr>
+                  <tr className="block md:table-row">
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">目前工地狀況</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="currentStatus" value={formData.currentStatus} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">服務區</td>
+                    <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
+                      <input type="text" name="serviceArea" value={formData.serviceArea} onChange={handleInputChange} className="w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                    </td>
+                  </tr>
+                  <tr className="block md:table-row">
+                    <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold align-top" colSpan="4">
+                      <div className="mb-1">建議與評估：</div>
+                      <textarea 
+                        name="suggestions" 
+                        value={formData.suggestions} 
+                        onChange={handleInputChange} 
+                        className="w-full h-24 bg-transparent border-none box-border outline-none resize-none px-3 md:px-2 py-1 md:py-2 focus:bg-blue-50 text-base sm:text-[15px]"
+                      ></textarea>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <div className="photo-area mt-4 border border-gray-400 flex flex-col flex-1 min-h-[250px] md:min-h-0 relative group">
+                <div className="label-cell bg-gray-100 font-semibold p-2.5 md:p-2 border-b border-gray-400 shrink-0 flex justify-between items-center">
+                  <span>綠牌照片：</span>
+                </div>
+                
+                <div className="flex-1 relative bg-gray-50 m-2 overflow-hidden">
+                  {photoDataUrl ? (
+                    <>
+                      <img 
+                        src={photoDataUrl} 
+                        alt="綠牌照片" 
+                        style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'contain' }}
+                        className="shadow-sm border border-gray-200"
+                      />
+                      <button 
+                        onClick={() => setIsEditingPhoto(true)}
+                        className="hide-on-pdf absolute top-2 right-2 bg-gray-800/90 hover:bg-gray-900 text-white p-3 sm:p-2.5 rounded-full shadow-lg transition-all z-10"
+                        title="自由編輯照片"
+                      >
+                        <svg className="w-5 h-5 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243-4.243 3 3 0 004.243 4.243z"></path></svg>
+                      </button>
+                    </>
+                  ) : (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-400">
+                      <svg className="w-12 h-12 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                      <span>尚未上傳照片</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 自由編輯/裁切的彈出視窗 Modal */}
+          {isEditingPhoto && (
+            <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col">
+              <div className="p-3 sm:p-4 bg-gray-900 text-white flex justify-between items-center shrink-0">
+                <h3 className="text-base sm:text-lg font-bold flex items-center gap-2">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243-4.243 3 3 0 004.243 4.243z"></path></svg>
+                  編輯綠牌照片
+                </h3>
+                <button onClick={() => setIsEditingPhoto(false)} className="text-gray-400 hover:text-white p-2">
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+              </div>
+              <div className="flex-1 min-h-0 relative flex items-center justify-center p-2 sm:p-4">
+                <img
+                  ref={cropperImgRef}
+                  src={photoDataUrl}
+                  alt="待裁切照片"
+                  className="max-w-full max-h-full block"
+                />
+              </div>
+              <div className="p-3 sm:p-4 bg-gray-900 grid grid-cols-3 sm:flex sm:flex-wrap justify-center gap-2 sm:gap-4 shrink-0 shadow-lg">
+                <button onClick={() => cropperRef.current?.rotate(-90)} className="px-2 sm:px-4 py-2 text-sm sm:text-base bg-gray-700 text-white rounded hover:bg-gray-600 transition flex justify-center items-center gap-1">
+                  <svg className="w-4 h-4 hidden sm:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"></path></svg>左轉
+                </button>
+                <button onClick={() => cropperRef.current?.rotate(90)} className="px-2 sm:px-4 py-2 text-sm sm:text-base bg-gray-700 text-white rounded hover:bg-gray-600 transition flex justify-center items-center gap-1">
+                  右轉<svg className="w-4 h-4 hidden sm:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 10h-10a8 8 0 00-8 8v2M21 10l-6 6m6-6l-6-6"></path></svg>
+                </button>
+                <button onClick={() => cropperRef.current?.reset()} className="px-2 sm:px-4 py-2 text-sm sm:text-base bg-gray-700 text-white rounded hover:bg-gray-600 transition flex justify-center items-center">重設</button>
+                
+                <button onClick={() => setIsEditingPhoto(false)} className="col-span-1 px-2 sm:px-6 py-2 text-sm sm:text-base bg-red-600 text-white rounded hover:bg-red-700 transition flex justify-center items-center">取消</button>
+                <button onClick={handleCropConfirm} className="col-span-2 px-2 sm:px-6 py-2 text-sm sm:text-base bg-green-600 text-white rounded hover:bg-green-700 transition font-bold flex justify-center items-center gap-1">
+                  <svg className="w-5 h-5 hidden sm:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>確認完成
+                </button>
+              </div>
+            </div>
+          )}
+
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
