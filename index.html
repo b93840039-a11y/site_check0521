@@ -282,7 +282,7 @@
           const aiData = JSON.parse(aiText);
 
           // --- 步驟 3：背景執行 591 查詢 ---
-          showMessage(`步驟 3/3：辨識成功！嘗試利用「執照字號」自 591 查詢預計完工日...`, 'info');
+          showMessage(`步驟 3/3：辨識成功！嘗試利用「執照字號」或「案名」自 591 查詢預計完工日...`, 'info');
           let scrapedEstimatedDate = "";
           try {
             const targetUrl = 'https://newhouse.591.com.tw/list?regionid=6&sectionid=75,73,79,78,74&utm_source=newhouse&utm_medium=home&utm_campaign=search';
@@ -293,15 +293,19 @@
             if (fetchData.contents) {
                 const htmlContent = fetchData.contents;
                 
-                // 嚴格依據要求：利用綠牌資訊中的「執照字號」資訊來比對
+                // 恢復混合比對：嘗試用建照字號或案地名稱匹配
                 const licenseToMatch = aiData.licenseNumber || "";
-                // 通常 591 網頁只會顯示連續的執照號碼 (如 01068)，我們用正規表示式將純數字提取出來比對
                 const numberMatch = licenseToMatch.match(/\d{4,}/); 
                 const searchKey = numberMatch ? numberMatch[0] : null;
+                const cleanProjectName = aiData.projectName ? aiData.projectName.replace(/新建工程|工程/g, '').trim() : '';
                 
                 let index = -1;
                 if (searchKey && htmlContent.includes(searchKey)) {
                     index = htmlContent.indexOf(searchKey);
+                    console.log("591 比對成功！(依據：建照字號)");
+                } else if (cleanProjectName && cleanProjectName.length >= 2 && htmlContent.includes(cleanProjectName)) {
+                    index = htmlContent.indexOf(cleanProjectName);
+                    console.log("591 比對成功！(依據：案地名稱)");
                 }
 
                 if (index !== -1) {
@@ -312,10 +316,10 @@
                     const match = chunk.match(completionRegex);
                     if (match) {
                         scrapedEstimatedDate = match[1];
-                        console.log("591 比對成功！預計完工日:", scrapedEstimatedDate);
+                        console.log("預計完工日擷取結果:", scrapedEstimatedDate);
                     }
                 } else {
-                    console.log(`在 591 中找不到符合執照字號 "${searchKey}" 的建案。`);
+                    console.log(`在 591 中找不到符合建照字號或案名的建案。`);
                 }
             }
           } catch (e) {
