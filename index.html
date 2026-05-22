@@ -131,9 +131,9 @@
         reportDate: new Date().toISOString().split('T')[0],
         licenseNumber: '',
         completionDate: '',
-        estimatedCompletionDate: '', // 新增：預計完工日
+        estimatedCompletionDate: '', // 預計完工日
         projectName: '',
-        totalUnits: '',
+        totalUnits: '', // 總建戶
         projectAddress: '',
         buildingType: '',
         builderName: '',
@@ -253,6 +253,7 @@
             7. buildingType (建築型態): 從工程名稱或樓層資訊中判斷是大樓、透天或廠房等。
             8. siteManager (工地負責人): 通常寫為「專任工程人員」、「工地主任」或「承造人專任工程人員」。
             9. managerPhone (聯絡電話): 對應上述負責人或工地的聯絡電話。
+            10. totalUnits (總建戶): 請仔細查看綠牌下方的「工程概要」欄位，通常會寫類似「地上X層地下Y層Z幢W棟 N戶」或「共計X幢Y棟N戶」，請從中精準擷取出總戶數（例如：填寫「108戶」或「64戶」）。如果找不到戶數資訊，請填空字串。
 
             ⚠️ 重要指示：請「只」輸出 JSON 格式的資料，絕對不要加上任何 \`\`\`json 標記、也不要加上任何額外的文字說明。
           `;
@@ -281,7 +282,7 @@
           const aiData = JSON.parse(aiText);
 
           // --- 步驟 3：背景執行 591 查詢 ---
-          showMessage(`步驟 3/3：辨識成功！嘗試自 591 查詢預計完工日...`, 'info');
+          showMessage(`步驟 3/3：辨識成功！嘗試利用「執照字號」自 591 查詢預計完工日...`, 'info');
           let scrapedEstimatedDate = "";
           try {
             const targetUrl = 'https://newhouse.591.com.tw/list?regionid=6&sectionid=75,73,79,78,74&utm_source=newhouse&utm_medium=home&utm_campaign=search';
@@ -292,29 +293,29 @@
             if (fetchData.contents) {
                 const htmlContent = fetchData.contents;
                 
-                // 嘗試用建照字號或案地名稱匹配
+                // 嚴格依據要求：利用綠牌資訊中的「執照字號」資訊來比對
                 const licenseToMatch = aiData.licenseNumber || "";
+                // 通常 591 網頁只會顯示連續的執照號碼 (如 01068)，我們用正規表示式將純數字提取出來比對
                 const numberMatch = licenseToMatch.match(/\d{4,}/); 
                 const searchKey = numberMatch ? numberMatch[0] : null;
-                const cleanProjectName = aiData.projectName ? aiData.projectName.replace(/新建工程|工程/g, '').trim() : '';
                 
                 let index = -1;
                 if (searchKey && htmlContent.includes(searchKey)) {
                     index = htmlContent.indexOf(searchKey);
-                } else if (cleanProjectName && cleanProjectName.length >= 2 && htmlContent.includes(cleanProjectName)) {
-                    index = htmlContent.indexOf(cleanProjectName);
                 }
 
                 if (index !== -1) {
-                    // 擷取前後文段落分析
+                    // 擷取前後文段落分析完工日期
                     const chunk = htmlContent.substring(Math.max(0, index - 1000), index + 1000);
-                    // 尋找「完工：2026年Q4」之類的格式
+                    // 尋找「完工：2026年Q4」或類似格式
                     const completionRegex = /(?:完工|交屋)(?:時間|日期|年度|年月)?[：:]?\s*?(\d{4}年(?:\d{1,2}月|\d{1,2}季|Q\d)?|\d{4}-\d{2}-\d{2}|\d{4}年)/i;
                     const match = chunk.match(completionRegex);
                     if (match) {
                         scrapedEstimatedDate = match[1];
-                        console.log("591 預計完工日:", scrapedEstimatedDate);
+                        console.log("591 比對成功！預計完工日:", scrapedEstimatedDate);
                     }
+                } else {
+                    console.log(`在 591 中找不到符合執照字號 "${searchKey}" 的建案。`);
                 }
             }
           } catch (e) {
@@ -330,6 +331,7 @@
             constructorName: aiData.constructorName || prev.constructorName,
             completionDate: aiData.completionDate || prev.completionDate,
             estimatedCompletionDate: scrapedEstimatedDate || prev.estimatedCompletionDate, // 填入 591 預計完工日
+            totalUnits: aiData.totalUnits || prev.totalUnits, // 填入 工程概要 裡的總建戶
             buildingType: aiData.buildingType || prev.buildingType,
             siteManager: aiData.siteManager || prev.siteManager,
             managerPhone: aiData.managerPhone || prev.managerPhone,
@@ -484,7 +486,7 @@
                   <tr className="block md:table-row">
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">總建戶</td>
                     <td className="input-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-0 h-12 md:h-auto bg-white md:bg-transparent">
-                      <input type="text" name="totalUnits" value={formData.totalUnits} onChange={handleInputChange} className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
+                      <input type="text" name="totalUnits" value={formData.totalUnits} onChange={handleInputChange} placeholder="自工程概要擷取" className="print-hide w-full h-full bg-transparent border-none box-border px-3 md:px-2 py-1.5 outline-none focus:bg-blue-50 text-base sm:text-[15px]" />
                       <div className="print-show hidden w-full h-full box-border px-3 md:px-2 py-1.5 text-base sm:text-[15px]">{formData.totalUnits}</div>
                     </td>
                     <td className="label-cell block md:table-cell border border-gray-400 border-t-0 md:border-t p-2.5 md:p-2 bg-gray-100 font-semibold">建築型態<br/><span className="text-xs font-normal text-gray-600 md:inline hidden">(大樓/透天等等)</span></td>
@@ -588,6 +590,7 @@
             </div>
           </div>
 
+          {/* 自由編輯/裁切的彈出視窗 Modal */}
           {isEditingPhoto && (
             <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col">
               <div className="p-3 sm:p-4 bg-gray-900 text-white flex justify-between items-center shrink-0">
