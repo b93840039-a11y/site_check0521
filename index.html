@@ -96,7 +96,7 @@
             const errorText = await response.text();
             if (response.status === 400 || response.status === 403 || response.status === 404) {
                let parsedError = errorText;
-               try { jsonObj = JSON.parse(errorText); parsedError = jsonObj.error.message || errorText; } catch(e) {}
+               try { const jsonObj = JSON.parse(errorText); parsedError = jsonObj.error.message || errorText; } catch(e) {}
                throw new Error(`[${response.status}] ${parsedError}`);
             }
             if (response.status === 429) throw new Error(`[429] API 請求次數暫時達上限，請稍等 1~2 分鐘後再試`);
@@ -281,8 +281,8 @@
           aiText = aiText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
           const aiData = JSON.parse(aiText);
 
-          // --- 步驟 3：背景執行 591 查詢 ---
-          showMessage(`步驟 3/3：辨識成功！嘗試利用「執照字號」或「案名」自 591 查詢預計完工日...`, 'info');
+          // --- 步驟 3：背景執行 591 查詢 (四重智慧混合比對) ---
+          showMessage(`步驟 3/3：辨識成功！啟動多重比對自 591 查詢預計完工日...`, 'info');
           let scrapedEstimatedDate = "";
           try {
             const targetUrl = 'https://newhouse.591.com.tw/list?regionid=6&sectionid=75,73,79,78,74&utm_source=newhouse&utm_medium=home&utm_campaign=search';
@@ -293,37 +293,75 @@
             if (fetchData.contents) {
                 const htmlContent = fetchData.contents;
                 
-                // 恢復混合比對：嘗試用建照字號或案地名稱匹配
+                // 準備多組關鍵字來進行比對，提高成功率
+                let keywordsToTry = [];
+                
+                // 1. 執照字號 (如 "01068")
                 const licenseToMatch = aiData.licenseNumber || "";
                 const numberMatch = licenseToMatch.match(/\d{4,}/); 
-                const searchKey = numberMatch ? numberMatch[0] : null;
-                const cleanProjectName = aiData.projectName ? aiData.projectName.replace(/新建工程|工程/g, '').trim() : '';
+                if (numberMatch) keywordsToTry.push({ type: '建照字號', text: numberMatch[0] });
                 
+                // 2. 案地名稱 (去除「新建工程、集合住宅」等贅字)
+                const cleanProjectName = aiData.projectName ? aiData.projectName.replace(/新建工程|工程|集合住宅|店鋪|大樓/g, '').trim() : '';
+                if (cleanProjectName && cleanProjectName.length >= 2) keywordsToTry.push({ type: '案地名稱', text: cleanProjectName });
+                
+                // 3. 建商名稱核心 (如「悅佳建設股份有限公司」->「悅佳」)
+                const cleanBuilder = aiData.builderName ? aiData.builderName.replace(/股份有限公司|有限公司|建設/g, '').trim() : '';
+                if (cleanBuilder && cleanBuilder.length >= 2) keywordsToTry.push({ type: '建商名稱', text: cleanBuilder });
+                
+                // 4. 地段名稱 (如「福興段」)
+                const matchAddress = aiData.projectAddress ? aiData.projectAddress.match(/[\u4e00-\u9fa5]{2,4}段/) : null;
+                if (matchAddress) keywordsToTry.push({ type: '地段名稱', text: matchAddress[0] });
+
                 let index = -1;
-                if (searchKey && htmlContent.includes(searchKey)) {
-                    index = htmlContent.indexOf(searchKey);
-                    console.log("591 比對成功！(依據：建照字號)");
-                } else if (cleanProjectName && cleanProjectName.length >= 2 && htmlContent.includes(cleanProjectName)) {
-                    index = htmlContent.indexOf(cleanProjectName);
-                    console.log("591 比對成功！(依據：案地名稱)");
+                let matchedType = "";
+                let matchedText = "";
+
+                // 依序掃描 HTML，尋找符合的關鍵字
+                for (const kw of keywordsToTry) {
+                    if (htmlContent.includes(kw.text)) {
+                        const tempIndex = htmlContent.indexOf(kw.text);
+                        const chunk = htmlContent.substring(Math.max(0, tempIndex - 800), tempIndex + 800);
+                        
+                        // 若是較廣泛的詞(建商/地段)，確認附近有房產關鍵字才算成功，避免誤判
+                        if (kw.type === '建商名稱' || kw.type === '地段名稱') {
+                            if (/(完工|交屋|使照|建案|總價|格局)/.test(chunk)) {
+                                index = tempIndex; matchedType = kw.type; matchedText = kw.text; break;
+                            }
+                        } else {
+                            index = tempIndex; matchedType = kw.type; matchedText = kw.text; break;
+                        }
+                    }
                 }
 
                 if (index !== -1) {
-                    // 擷取前後文段落分析完工日期
-                    const chunk = htmlContent.substring(Math.max(0, index - 1000), index + 1000);
-                    // 尋找「完工：2026年Q4」或類似格式
-                    const completionRegex = /(?:完工|交屋)(?:時間|日期|年度|年月)?[：:]?\s*?(\d{4}年(?:\d{1,2}月|\d{1,2}季|Q\d)?|\d{4}-\d{2}-\d{2}|\d{4}年)/i;
+                    console.log(`591 比對成功！(依據：${matchedType} -> "${matchedText}")`);
+                    
+                    // 擴大擷取段落，尋找日期
+                    const chunk = htmlContent.substring(Math.max(0, index - 1500), index + 1500);
+                    
+                    // 強化日期匹配的正則表達式，支援「年底、下半年、Q4」等行銷用語
+                    const completionRegex = /(?:預計)?(?:完工|交屋|使照|取得)(?:時間|日期|年度|年月)?[：:\s]*?((?:預計)?\d{3,4}年(?:(?:底|初|中|下半年|上半年)|\d{1,2}月|\d{1,2}季|Q\d)?|\d{4}[-/]\d{1,2}[-/]\d{1,2})/i;
                     const match = chunk.match(completionRegex);
+                    
                     if (match) {
-                        scrapedEstimatedDate = match[1];
-                        console.log("預計完工日擷取結果:", scrapedEstimatedDate);
+                        scrapedEstimatedDate = match[1].replace('預計', '');
+                        console.log("預計完工日擷取結果(精準規則):", scrapedEstimatedDate);
+                    } else {
+                        // 備用規則：直接盲掃該區段是否有「年份+完工/交屋」
+                        const fallbackRegex = /(\d{4}年(?:\d{1,2}月|Q\d|底|下半年|上半年)?)(?:左右|預計)?(?:完工|交屋)/i;
+                        const fallbackMatch = chunk.match(fallbackRegex);
+                        if (fallbackMatch) {
+                            scrapedEstimatedDate = fallbackMatch[1];
+                            console.log("預計完工日擷取結果(備用規則):", scrapedEstimatedDate);
+                        }
                     }
                 } else {
-                    console.log(`在 591 中找不到符合建照字號或案名的建案。`);
+                    console.log(`在 591 中找不到符合的建案。已嘗試：${keywordsToTry.map(k=>k.text).join(', ')}`);
                 }
             }
           } catch (e) {
-            console.warn("591 查詢失敗，可能被防爬蟲阻擋:", e);
+            console.warn("591 查詢發生異常:", e);
           }
           
           setFormData(prev => ({
@@ -341,7 +379,7 @@
             managerPhone: aiData.managerPhone || prev.managerPhone,
           }));
           
-          showMessage(scrapedEstimatedDate ? '處理完成！已填入綠牌資訊與 591 完工日。' : '處理完成！(591 未找到相符完工日)', 'success');
+          showMessage(scrapedEstimatedDate ? '處理完成！已填入綠牌資訊與 591 完工日。' : '處理完成！(但 591 查無完工資訊)', 'success');
 
         } catch (error) {
           console.error("AI 處理錯誤:", error);
@@ -414,7 +452,7 @@
                   <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>重設金鑰
                 </button>
               </div>
-              <p className="text-xs sm:text-sm text-gray-500 mt-1">上傳綠牌照片，AI 自動為您填寫與比對！</p>
+              <p className="text-xs sm:text-sm text-gray-500 mt-1">上傳綠牌照片，AI 自動為您填寫與多重比對！</p>
             </div>
             
             <div className="flex flex-col sm:flex-row gap-2 sm:gap-3 w-full sm:w-auto">
