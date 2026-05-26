@@ -21,9 +21,8 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
 
-  <!-- PDF 專用列印樣式 (解決跑版與文字壓縮問題) -->
+  <!-- PDF 專用列印樣式 -->
   <style>
-    /* --- PDF 匯出強制轉為 A4 絕對尺寸與嚴格表格排版 --- */
     .pdf-exporting {
       width: 210mm !important;
       max-width: 210mm !important;
@@ -56,8 +55,6 @@
     }
     .pdf-exporting .label-cell { padding: 0.5rem !important; background-color: #f3f4f6 !important; }
     .pdf-exporting .input-cell { padding: 0 !important; background-color: transparent !important; }
-    
-    /* 💥 解決 html2canvas 文字被壓縮的關鍵修正：截圖時隱藏 input，顯示純文字 div */
     .pdf-exporting .print-hide { display: none !important; }
     .pdf-exporting .print-show {
       display: flex !important;
@@ -235,6 +232,9 @@
 
           if (availableModels.length === 0) throw new Error("無支援的圖片辨識模型。");
 
+          // 取一個支援聯網的模型名稱保存備用
+          const searchModel = availableModels.find(m => m.includes('2.5')) || availableModels[0];
+
           showMessage(`步驟 2/3：開始辨識綠牌資訊...`, 'info');
 
           const base64Image = dataUrl.split(',')[1];
@@ -281,80 +281,55 @@
           aiText = aiText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
           const aiData = JSON.parse(aiText);
 
-          // --- 步驟 3：背景執行雙引擎查詢 (樂居 + 591 提取行銷案名與完工日) ---
-          showMessage(`步驟 3/3：辨識成功！啟動「樂居+591」查詢真實案名與完工日...`, 'info');
+          // --- 步驟 3：背景執行 AI 聯網搜尋 (Google Search Grounding) ---
+          showMessage(`步驟 3/3：辨識成功！啟動 AI 聯網智慧搜尋真實案名與完工日...`, 'info');
           let scrapedEstimatedDate = "";
-          let officialProjectName = ""; // 新增：用來存放真正的行銷案名
+          let officialProjectName = ""; 
           
-          // 定義要抓取的目標網站列表
-          const searchSources = [
-            { name: '樂居', url: 'https://www.leju.com.tw/community_list?city=H&area=H333,H330,H337,H334,H338&is_new=1' },
-            { name: '591', url: 'https://newhouse.591.com.tw/list?regionid=6&sectionid=75,73,79,78,74&utm_source=newhouse&utm_medium=home&utm_campaign=search' }
-          ];
-
-          for (const source of searchSources) {
-            // 若日期和案名都抓到了，就提前結束搜尋
-            if (scrapedEstimatedDate && officialProjectName) break; 
-            
-            try {
-              console.log(`[爬蟲] 正在嘗試從 ${source.name} 尋找資料...`);
-              const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(source.url)}`;
-              const fetchRes = await fetch(proxyUrl);
-              const fetchData = await fetchRes.json();
+          try {
+            const searchPrompt = `
+              這是一個台灣建築工地的資訊：
+              - 執照字號：${aiData.licenseNumber}
+              - 建商(起造人)：${aiData.builderName}
+              - 案地地址：${aiData.projectAddress}
               
-              if (fetchData.contents) {
-                  const htmlContent = fetchData.contents;
-                  
-                  // 使用建照號碼中的連續數字進行精準匹配
-                  const licenseToMatch = aiData.licenseNumber || "";
-                  const numberMatch = licenseToMatch.match(/\d{4,}/); 
-                  const searchKey = numberMatch ? numberMatch[0] : null;
-
-                  if (searchKey && htmlContent.includes(searchKey)) {
-                      const index = htmlContent.indexOf(searchKey);
-                      console.log(`✅ [${source.name}] 比對成功！(建照字號: ${searchKey})`);
-                      
-                      // 取出前後文區塊來分析
-                      const chunk = htmlContent.substring(Math.max(0, index - 2000), index + 2000);
-                      
-                      // 1. 抓取日期
-                      if (!scrapedEstimatedDate) {
-                          const completionRegex = /(?:預計)?(?:完工|交屋|使照|取得)(?:時間|日期|年度|年月)?[：:\s]*?((?:預計)?\d{3,4}年(?:(?:底|初|中|下半年|上半年)|\d{1,2}月|\d{1,2}季|Q\d)?|\d{4}[-/]\d{1,2}[-/]\d{1,2})/i;
-                          const match = chunk.match(completionRegex);
-                          if (match) {
-                              scrapedEstimatedDate = match[1].replace('預計', '');
-                          } else {
-                              const fallbackRegex = /(\d{4}年(?:\d{1,2}月|Q\d|底|下半年|上半年)?)(?:左右|預計)?(?:完工|交屋)/i;
-                              const fallbackMatch = chunk.match(fallbackRegex);
-                              if (fallbackMatch) scrapedEstimatedDate = fallbackMatch[1];
-                          }
-                      }
-
-                      // 2. 抓取正確行銷案名 (找尋周圍 alt 或 title 標籤中的短文字)
-                      if (!officialProjectName) {
-                          const titleRegex = /(?:alt|title|data-title)=["']([^"']{2,15})["']/gi;
-                          let nameMatch;
-                          while ((nameMatch = titleRegex.exec(chunk)) !== null) {
-                              const potentialName = nameMatch[1];
-                              // 過濾掉不可能是案名的雜訊
-                              if (!potentialName.includes("建照") && !potentialName.includes("工程") && !potentialName.includes("圖片") && potentialName.length > 2) {
-                                  officialProjectName = potentialName;
-                                  console.log(`[${source.name}] 抓取到真實案名:`, officialProjectName);
-                                  break;
-                              }
-                          }
-                      }
-                  }
+              請你使用 Google 搜尋上述資訊，找出這個建案在房屋交易網站（如 591、樂居、Mobile01、建商官網 等）上對應的「真實行銷案名」（例如：如果是元臺建設，案名可能是「元臺朗」；如果是悅佳建設，案名可能是「悅佳涵馥」）以及「預計完工或交屋日期」（例如：2026年下半年、2025年Q4等）。
+              
+              請嚴格以 JSON 格式回傳，不要包含其他文字或 markdown 標記：
+              {
+                "officialProjectName": "找到的真實行銷案名，若無則填空字串",
+                "estimatedCompletionDate": "找到的預計完工日，若無則填空字串"
               }
-            } catch (e) {
-              console.warn(`${source.name} 查詢發生異常:`, e);
+            `;
+
+            const searchPayload = { 
+              contents: [{ role: "user", parts: [{ text: searchPrompt }] }],
+              tools: [{ google_search: {} }] // 啟用 Google 搜尋工具
+            };
+
+            const searchUrl = `https://generativelanguage.googleapis.com/v1beta/models/${searchModel}:generateContent?key=${apiKey}`;
+            const searchResult = await fetchWithRetry(searchUrl, { 
+              method: 'POST', 
+              headers: { 'Content-Type': 'application/json' }, 
+              body: JSON.stringify(searchPayload) 
+            });
+
+            const searchResultText = searchResult.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (searchResultText) {
+              const cleanedSearchText = searchResultText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+              const searchData = JSON.parse(cleanedSearchText);
+              officialProjectName = searchData.officialProjectName || "";
+              scrapedEstimatedDate = searchData.estimatedCompletionDate || "";
+              console.log("AI 聯網搜尋結果:", searchData);
             }
+          } catch (e) {
+            console.warn("AI 聯網搜尋發生異常:", e);
           }
           
           setFormData(prev => ({
             ...prev,
             licenseNumber: aiData.licenseNumber || prev.licenseNumber,
-            // 核心變更：如果爬蟲有抓到真實行銷案名，就蓋掉原本綠牌上死板的「新建工程」
+            // 同步行銷案名，若 AI 搜尋失敗則退回原綠牌資訊
             projectName: officialProjectName || aiData.projectName || prev.projectName,
             projectAddress: aiData.projectAddress || prev.projectAddress,
             builderName: aiData.builderName || prev.builderName,
@@ -381,7 +356,6 @@
         }
       };
 
-      // --- PDF 匯出與圖片分享邏輯 ---
       const handleExportPDF = () => {
         if (!window.html2pdf) { showMessage('PDF 匯出模組未載入', 'error'); return; }
         window.scrollTo(0, 0);
@@ -445,7 +419,7 @@
                   <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>重設金鑰
                 </button>
               </div>
-              <p className="text-xs sm:text-sm text-gray-500 mt-1">上傳綠牌照片，AI 自動辨識、搜尋並同步正確案名與完工日！</p>
+              <p className="text-xs sm:text-sm text-gray-500 mt-1">上傳綠牌照片，AI 自動辨識、聯網搜尋並同步正確案名與完工日！</p>
             </div>
             
             <div className="flex flex-col sm:flex-row gap-2 sm:gap-3 w-full sm:w-auto">
